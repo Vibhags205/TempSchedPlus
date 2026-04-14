@@ -10,7 +10,7 @@ def run_service(delay_seconds: int = 10):
     while True:
         scan_cycle = cold_pipeline.process_files()
         actions = scheduler.schedule()
-        future = prediction.predict()
+        future = prediction.predict(scheduler.snapshot()["temperature_store"])
         print("Scan/compression cycle:", scan_cycle)
         print("Scheduling actions:", actions)
         print("Predicted temperature:", future)

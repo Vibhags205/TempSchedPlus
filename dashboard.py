@@ -150,7 +150,7 @@ if st.session_state.pop("rerun", False):
 snapshot = scheduler.snapshot()
 cloud_records = snapshot["cloud_records"]
 temperature_store = snapshot["temperature_store"]
-predicted_temperature = prediction.predict()
+predicted_temperature = prediction.predict(temperature_store)
 cloud_connected = len(cloud_records) > 0 or len(snapshot["cloud"]) > 0
 pipeline_stats = cold_pipeline.get_pipeline_stats()
 last_scan_cycle = st.session_state.get("scan_cycle")
@@ -167,7 +167,7 @@ with metric_cols[2]:
 with metric_cols[3]:
 	_render_metric("Cold Records", pipeline_stats["compressed_records"], f"{len(snapshot['compressed'])} compressed copies")
 with metric_cols[4]:
-	_render_metric("Predicted Temp", predicted_temperature, "Random demo prediction for now")
+	_render_metric("Predicted Temp", predicted_temperature, "Deterministic forecast from real data")
 
 storage_cols = st.columns(3)
 with storage_cols[0]:
@@ -296,7 +296,7 @@ st.markdown(
 	<div class='panel-card'>
 		<div class='tier-title'>Next Access Forecast</div>
 		<div class='metric-value'>{predicted_temperature}</div>
-		<div class='small-note'>This is the current predicted temperature value returned by the prediction module.</div>
+		<div class='small-note'>This is the current predicted temperature value returned by the prediction module from real data.</div>
 	</div>
 	""",
 	unsafe_allow_html=True,

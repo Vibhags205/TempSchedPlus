@@ -104,7 +104,7 @@ def classify_file(file_info):
 
 
 def classify_with_ai(file_info):
-    raw_pred = prediction.predict()
+    raw_pred = prediction.predict(file_info)
     normalized = min(max(raw_pred / 800.0, 0.0), 1.0)
     if normalized > 0.7:
         return "hot", raw_pred
