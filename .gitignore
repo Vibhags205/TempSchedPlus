@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Generated runtime data
+cloud/
+compressed/
+encrypted/
+device/
+edge/
+logs/
+models/
+
+# Streamlit and editor metadata
+.streamlit/
+.vscode/
+
+# Misc
+*.log
