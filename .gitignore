@@ -20,3 +20,8 @@ models/
 
 # Misc
 *.log
+
+# Firebase credentials
+firebase_key.json
+*serviceAccount*.json
+*firebase-adminsdk*.json

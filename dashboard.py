@@ -5,6 +5,7 @@ import streamlit as st
 
 import cold_pipeline
 import config
+import firebase_backend
 import prediction
 import scheduler
 
@@ -150,14 +151,19 @@ if st.session_state.pop("rerun", False):
 snapshot = scheduler.snapshot()
 cloud_records = snapshot["cloud_records"]
 temperature_store = snapshot["temperature_store"]
-predicted_temperature = prediction.predict(temperature_store)
-cloud_connected = len(cloud_records) > 0 or len(snapshot["cloud"]) > 0
+current_temperature = prediction.current_temperature(temperature_store)
+firebase_connected = firebase_backend.firebase_is_configured()
+cloud_connected = firebase_connected or len(cloud_records) > 0 or len(snapshot["cloud"]) > 0
+firebase_records = firebase_backend.list_metadata(limit=1000) if firebase_connected else []
 pipeline_stats = cold_pipeline.get_pipeline_stats()
 last_scan_cycle = st.session_state.get("scan_cycle")
 scan_paths_count = len(getattr(config, "SCAN_PATHS", []))
 scan_max_files = int(getattr(config, "SCAN_MAX_FILES", 1500))
+last_scanned = int(last_scan_cycle.get("scanned", 0)) if last_scan_cycle else 0
+firebase_record_count = len(firebase_records)
+firebase_upload_count = sum(1 for item in firebase_records if str(item.get("tier", "")).lower() == "cold")
 
-metric_cols = st.columns(5)
+metric_cols = st.columns(6)
 with metric_cols[0]:
 	_render_metric("Device Files", len(snapshot["device"]), f"{_count_bytes(config.DEVICE)} bytes")
 with metric_cols[1]:
@@ -165,33 +171,49 @@ with metric_cols[1]:
 with metric_cols[2]:
 	_render_metric("Cloud Archives", len(snapshot["cloud"]), f"{_count_bytes(config.CLOUD)} bytes")
 with metric_cols[3]:
-	_render_metric("Cold Records", pipeline_stats["compressed_records"], f"{len(snapshot['compressed'])} compressed copies")
+	_render_metric("Staged Records", pipeline_stats["compressed_records"], f"{len(snapshot['compressed'])} local copies")
 with metric_cols[4]:
-	_render_metric("Predicted Temp", predicted_temperature, "Deterministic forecast from real data")
+	_render_metric("Scanned (last run)", last_scanned, "Files inspected by cold pipeline")
+with metric_cols[5]:
+	_render_metric("Current Temp", current_temperature, "Current state from recent temperature values")
 
 storage_cols = st.columns(3)
 with storage_cols[0]:
-	_render_metric("Storage Saved", f"{pipeline_stats['saved_mb']} MB", "Total bytes saved by cold compression")
+	_render_metric("Staged Data", f"{pipeline_stats['saved_mb']} MB", "Bytes copied into the device tier")
 with storage_cols[1]:
 	_render_metric("Scan Paths", scan_paths_count, "Documents/Downloads by default")
 with storage_cols[2]:
 	_render_metric("Max Scan Files", scan_max_files, "Per scan cycle")
 
+firebase_cols = st.columns(3)
+with firebase_cols[0]:
+	_render_metric("Firebase Records", firebase_record_count, "Firestore documents in files collection")
+with firebase_cols[1]:
+	_render_metric("Firebase Uploads", firebase_upload_count, "Cold files sent to Firebase Storage")
+with firebase_cols[2]:
+	_render_metric("Firebase Ready", "Yes" if firebase_connected else "No", "Key file and bucket detected")
+
 st.markdown(
 	"""
 	<div class='panel-card'>
 		<div class='tier-title'>Cloud Connection Status</div>
-		<div class='small-note'>This project uses a local cloud simulation folder right now. When a file is classified as COLD, it is compressed, encrypted, copied into the cloud folder, and written to the cloud index.</div>
+		<div class='small-note'>Firebase Storage and Firestore are used when the service account key and bucket are configured. The local cloud folder remains available as a fallback archive/index.</div>
 	</div>
 	""",
 	unsafe_allow_html=True,
 )
 
+st.write(f"Firebase connected: {'Yes' if firebase_connected else 'Not yet'}")
 st.write(f"Cloud connected: {'Yes' if cloud_connected else 'Not yet'}")
+
+if firebase_connected:
+	st.success("Firebase is configured and ready for uploads and metadata writes.")
+else:
+	st.warning("Firebase is not configured yet, so the dashboard is showing local cloud storage state only.")
 
 if last_scan_cycle:
 	st.success(
-		f"Last scan: scanned {last_scan_cycle['scanned']} files, cold={last_scan_cycle['cold']}, newly compressed={last_scan_cycle['compressed']}, saved={round(last_scan_cycle['saved_bytes'] / (1024 * 1024), 2)} MB"
+		f"Last scan: scanned {last_scan_cycle.get('scanned', 0)} files, hot={last_scan_cycle.get('hot', 0)}, warm={last_scan_cycle.get('warm', 0)}, cold={last_scan_cycle.get('cold', 0)}, staged={last_scan_cycle.get('staged', 0)}"
 	)
 
 st.markdown("<div class='section-title'>Hot Data Status</div>", unsafe_allow_html=True)
@@ -227,7 +249,7 @@ if last_scan_cycle:
 				{
 					"Path": item.get("path", ""),
 					"Decision": str(item.get("decision", "")).upper(),
-					"Predicted Temp": item.get("predicted_temperature", ""),
+					"Current Temp Score": item.get("predicted_temperature", ""),
 					"Size (KB)": round(float(item.get("size", 0)) / 1024, 2),
 				}
 				for item in classified_rows[:50]
@@ -242,24 +264,18 @@ st.markdown("<div class='section-title'>Tier Overview</div>", unsafe_allow_html=
 tier_cols = st.columns(3)
 with tier_cols[0]:
 	st.markdown("<div class='panel-card'><div class='tier-title'>Device Tier</div>", unsafe_allow_html=True)
-	if snapshot["device"]:
-		st.markdown("".join(f"<span class='file-pill'>{name}</span>" for name in snapshot["device"]), unsafe_allow_html=True)
-	else:
-		st.write("No active files in device tier.")
+	st.write(f"Files: {len(snapshot['device'])}")
+	st.write(f"Size: {_count_bytes(config.DEVICE)} bytes")
 	st.markdown("</div>", unsafe_allow_html=True)
 with tier_cols[1]:
 	st.markdown("<div class='panel-card'><div class='tier-title'>Edge Tier</div>", unsafe_allow_html=True)
-	if snapshot["edge"]:
-		st.markdown("".join(f"<span class='file-pill'>{name}</span>" for name in snapshot["edge"]), unsafe_allow_html=True)
-	else:
-		st.write("No files staged at edge.")
+	st.write(f"Files: {len(snapshot['edge'])}")
+	st.write(f"Size: {_count_bytes(config.EDGE)} bytes")
 	st.markdown("</div>", unsafe_allow_html=True)
 with tier_cols[2]:
 	st.markdown("<div class='panel-card'><div class='tier-title'>Cloud Tier</div>", unsafe_allow_html=True)
-	if snapshot["cloud"]:
-		st.markdown("".join(f"<span class='file-pill'>{name}</span>" for name in snapshot["cloud"]), unsafe_allow_html=True)
-	else:
-		st.write("No cold archives stored in cloud.")
+	st.write(f"Files: {len(snapshot['cloud'])}")
+	st.write(f"Size: {_count_bytes(config.CLOUD)} bytes")
 	st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("<div class='section-title'>Cold Data Pipeline</div>", unsafe_allow_html=True)
@@ -269,12 +285,12 @@ with pipeline_cols[0]:
 		"""
 		<div class='panel-card'>
 			<div class='tier-title'>Cold Archive Flow</div>
-			<div class='small-note'>Files classified as COLD are compressed, encrypted, indexed, and copied to cloud storage.</div>
+			<div class='small-note'>Files are scanned into the device tier first. The scheduler then moves hot files to device, warm files to edge, and cold files to cloud after compression and encryption. Cold archives are also uploaded to Firebase Storage.</div>
 			<ol>
-				<li>Device file is scheduled after temperature decay.</li>
-				<li>Cold file is compressed with gzip.</li>
-				<li>Compressed payload is encrypted with Fernet.</li>
-				<li>Final encrypted bundle is stored in cloud and indexed.</li>
+				<li>Scanned file is staged into the device tier.</li>
+				<li>Scheduler classifies it as hot, warm, or cold.</li>
+				<li>Warm files move to edge storage.</li>
+				<li>Cold files are compressed, encrypted, stored locally in cloud, and uploaded to Firebase Storage.</li>
 			</ol>
 		</div>
 		""",
@@ -290,13 +306,13 @@ with pipeline_cols[1]:
 		st.write("No temperature history yet. Run a scheduling cycle to populate this panel.")
 	st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("<div class='section-title'>Predicted Temperature</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-title'>Current Temperature</div>", unsafe_allow_html=True)
 st.markdown(
 	f"""
 	<div class='panel-card'>
-		<div class='tier-title'>Next Access Forecast</div>
-		<div class='metric-value'>{predicted_temperature}</div>
-		<div class='small-note'>This is the current predicted temperature value returned by the prediction module from real data.</div>
+		<div class='tier-title'>Current System Temperature</div>
+		<div class='metric-value'>{current_temperature}</div>
+		<div class='small-note'>This is the current temperature estimate from the latest scheduler state.</div>
 	</div>
 	""",
 	unsafe_allow_html=True,
@@ -328,7 +344,7 @@ if pipeline_stats["recent"]:
 			{
 				"Original Path": item.get("original_path", ""),
 				"Decision": item.get("decision", ""),
-				"Predicted Temp": item.get("predicted_temperature", ""),
+				"Current Temp Score": item.get("predicted_temperature", ""),
 				"Saved (KB)": round(item.get("saved_bytes", 0) / 1024, 2),
 				"Compressed Path": item.get("compressed_path", ""),
 			}
@@ -338,4 +354,4 @@ if pipeline_stats["recent"]:
 		hide_index=True,
 	)
 else:
-	st.info("No cold files compressed from system scan yet.")
+	st.info("No files have been staged from the system scan yet.")

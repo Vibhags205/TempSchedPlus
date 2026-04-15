@@ -4,9 +4,9 @@ from datetime import datetime
 from pathlib import Path
 import json
 import os
+import shutil
 import time
 
-import compression
 import config
 import prediction
 
@@ -53,6 +53,39 @@ def _load_manifest():
 
 def _save_manifest(records):
     MANIFEST_PATH.write_text(json.dumps(records, indent=2), encoding="utf-8")
+
+
+def _device_stage_path(source_path: Path):
+    source_hash = str(abs(hash(str(source_path.resolve()))))
+    return config.DEVICE / f"stage_{source_hash}_{source_path.name}"
+
+
+def _edge_stage_path(source_path: Path):
+    source_hash = str(abs(hash(str(source_path.resolve()))))
+    return config.EDGE / f"stage_{source_hash}_{source_path.name}"
+
+
+def _cloud_stage_pattern(source_path: Path):
+    source_hash = str(abs(hash(str(source_path.resolve()))))
+    return f"stage_{source_hash}_{source_path.stem}.bundle.enc"
+
+
+def _is_present_in_any_tier(source_path: Path):
+    if _device_stage_path(source_path).exists():
+        return True
+    if _edge_stage_path(source_path).exists():
+        return True
+    if (config.CLOUD / _cloud_stage_pattern(source_path)).exists():
+        return True
+    return False
+
+
+def stage_to_device(source_path: Path):
+    staged_path = _device_stage_path(source_path)
+    staged_path.parent.mkdir(parents=True, exist_ok=True)
+    if not staged_path.exists():
+        shutil.copy2(source_path, staged_path)
+    return staged_path
 
 
 def get_files(scan_paths=None, max_files=None):
@@ -125,24 +158,6 @@ def final_decision(file_info):
     return decision, rule_decision, ai_decision, raw_prediction
 
 
-def compress_cold_file(file_path: Path):
-    filename_hash = str(abs(hash(str(file_path))))
-    destination = config.COMPRESSED / f"sys_{filename_hash}_{file_path.name}.zst"
-    compressed_path = compression.compress_file_zstd(file_path, destination, level=10)
-
-    original_size = file_path.stat().st_size
-    compressed_size = compressed_path.stat().st_size
-    saved = max(original_size - compressed_size, 0)
-
-    return {
-        "original_path": str(file_path),
-        "compressed_path": str(compressed_path),
-        "original_size": int(original_size),
-        "compressed_size": int(compressed_size),
-        "saved_bytes": int(saved),
-    }
-
-
 def process_files(scan_paths=None, max_files=None):
     records = _load_manifest()
     processed_paths = {entry.get("original_path") for entry in records}
@@ -153,8 +168,7 @@ def process_files(scan_paths=None, max_files=None):
         "hot": 0,
         "warm": 0,
         "cold": 0,
-        "compressed": 0,
-        "saved_bytes": 0,
+        "staged": 0,
         "entries": [],
         "classified": [],
         "hot_files": [],
@@ -188,18 +202,23 @@ def process_files(scan_paths=None, max_files=None):
         if decision == "hot":
             cycle["hot_files"].append(str(path))
 
-        if decision == "cold" and str(path) not in processed_paths:
+        should_stage = str(path) not in processed_paths or not _is_present_in_any_tier(path)
+        if should_stage:
             try:
-                compression_result = compress_cold_file(path)
-            except (FileNotFoundError, PermissionError, OSError, RuntimeError):
+                staged_path = stage_to_device(path)
+            except (FileNotFoundError, PermissionError, OSError):
                 continue
 
-            entry.update(compression_result)
+            entry.update(
+                {
+                    "staged_path": str(staged_path),
+                    "staged_tier": "device",
+                }
+            )
             records.append(entry)
             processed_paths.add(str(path))
 
-            cycle["compressed"] += 1
-            cycle["saved_bytes"] += compression_result["saved_bytes"]
+            cycle["staged"] += 1
             cycle["entries"].append(entry)
 
     _save_manifest(records)
@@ -212,10 +231,10 @@ def process_files(scan_paths=None, max_files=None):
 
 def get_pipeline_stats():
     records = _load_manifest()
-    total_saved = sum(int(item.get("saved_bytes", 0)) for item in records)
+    total_staged = sum(int(item.get("size", 0)) for item in records)
     return {
         "compressed_records": len(records),
-        "saved_bytes": total_saved,
-        "saved_mb": round(total_saved / (1024 * 1024), 2),
+        "saved_bytes": total_staged,
+        "saved_mb": round(total_staged / (1024 * 1024), 2),
         "recent": records[-10:],
     }

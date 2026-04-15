@@ -9,6 +9,7 @@ import shutil
 import compression
 import config
 import encryption
+import firebase_backend
 
 
 INDEX_PATH = config.CLOUD / "index.json"
@@ -63,11 +64,18 @@ def archive_cold_file(source_path: Path, temperature: float):
     cloud_path = config.CLOUD / cloud_name
     shutil.copy2(encrypted_path, cloud_path)
 
+    firebase_object = None
+    try:
+        firebase_object = firebase_backend.upload_to_cloud(encrypted_path)
+    except (FileNotFoundError, PermissionError, OSError, ValueError):
+        firebase_object = None
+
     checksum = sha256(cloud_path.read_bytes()).hexdigest()
     records = _load_index()
     record = {
         "filename": source_path.name,
         "cloud_object": cloud_name,
+        "firebase_object": firebase_object,
         "compressed_path": str(compressed_path),
         "encrypted_path": str(encrypted_path),
         "checksum": checksum,
